@@ -289,7 +289,7 @@ git 인덱스에서 `100755` 가 보이면 실행권한 포함, `100644` 는 일
 
 ---
 
-## 9. 자주 막힐만한 에러 → 대응
+## 9. 자주 막힐만한 에러 → 대응 (기본편)
 
 | 에러 메시지 | 원인 | 해결 |
 |---|---|---|
@@ -299,24 +299,251 @@ git 인덱스에서 `100755` 가 보이면 실행권한 포함, `100644` 는 일
 | `/usr/bin/env: bash\r` | Windows CRLF 가 스크립트에 섞임 | `.gitattributes` + `dos2unix` |
 | `could not select device driver "nvidia"` | NVIDIA Container Toolkit 미설치 | `sudo apt install nvidia-container-toolkit` |
 | 모델이 CPU로만 돔 | Jetson CUDA 미탐지 | `docker exec qwen-jetson ollama ps` 의 PROCESSOR 열 확인, `tegrastats` 로 교차 확인 |
+| `exit code: 1` (Dockerfile의 `install.sh`) | 설치 스크립트가 `lspci`/`lshw` 요구 | → **§10.1** |
+| `exit code: 22` (curl 다운로드) | 릴리스 에셋 이름이 바뀌어 404 | → **§10.2** |
+| `exit code: 127` (tar 풀고 실행 시) | 압축 파일에 바이너리 없음 (오버레이) | → **§10.3** |
+| `NvMapMemAllocInternalTagged error 12` | CUDA 라이브러리 ABI 불일치 | → **§10.4** |
+| 3B 모델만 OOM | mmap + 큰 KV cache | → **§10.5** |
 
 ---
 
-## 10. 다음 단계
+## 10. 실전 트러블슈팅 기록 — 이 프로젝트를 완성하면서 만난 모든 에러
 
-1. `sudo usermod -aG docker $USER` 실행 후 **SSH 재접속**
+이 섹션은 **실제로 우리가 겪은** 문제와 해결 과정을 순서대로 기록한 것입니다.
+비슷한 에러를 마주쳤을 때 참고하세요.
+
+### 10.1 Ollama 설치 스크립트(`install.sh`)가 실패
+
+**에러**
+```
+failed to solve: process "/bin/sh -c curl -fsSL https://ollama.com/install.sh | sh"
+did not complete successfully: exit code: 1
+```
+
+**원인**
+Ollama 공식 설치 스크립트 내부에서 `lspci`/`lshw` 로 NVIDIA GPU 를 탐지하는데,
+`l4t-jetpack` 베이스 이미지엔 두 도구 모두 없어서 스크립트가 즉시 `exit 1` 로 종료됨.
+게다가 Jetson의 통합 GPU(iGPU)는 **PCIe 장치가 아니어서 `lspci` 로 애초에 탐지 불가**.
+즉 이 스크립트는 Jetson 환경 자체에 맞지 않음.
+
+**교훈**
+설치 스크립트(`curl | sh`)는 일반 데스크탑/서버용으로 만들어진 경우가 많아
+컨테이너 이미지나 임베디드 보드에서는 실패할 수 있음. 바이너리를 직접 받는 편이 안전.
+
+---
+
+### 10.2 GitHub Releases 에셋 이름이 바뀌어 404
+
+**에러**
+```
+curl ... did not complete successfully: exit code: 22
+```
+
+(curl exit 22 = HTTP 4xx/5xx 받음 → URL 에 해당 파일 없음)
+
+**원인**
+예전 Ollama 릴리스엔 `ollama-linux-arm64.tgz` 였지만, 최신은 **`ollama-linux-arm64.tar.zst`**
+(zstandard 압축 포맷). 옛 URL 로는 404 발생.
+
+**확인 방법**
+GitHub Releases 페이지나 `gh api` 로 실제 에셋 목록을 본다:
+```bash
+gh api repos/ollama/ollama/releases/latest --jq '.assets[] | .name'
+```
+
+**교훈**
+`/releases/latest/download/<name>` 링크를 쓸 때 name 이 바뀔 수 있음.
+릴리스 노트 / 에셋 목록을 먼저 확인하는 습관을 들이자.
+
+---
+
+### 10.3 jetpack6 패키지 안엔 실행 바이너리가 없더라 (Exit 127)
+
+**에러**
+```
+failed to solve: process "/bin/sh -c curl ... ollama-linux-arm64-jetpack6.tar.zst
+  -o /tmp/ollama.tar.zst && tar --zstd -xf ... && /usr/local/bin/ollama --version"
+did not complete successfully: exit code: 127
+```
+
+(exit 127 = "command not found" — 압축은 풀렸지만 기대한 위치에 바이너리가 없음)
+
+**원인**
+Ollama 릴리스는 Jetson 에 두 개의 tarball 을 쪼개서 배포함:
+- `ollama-linux-arm64.tar.zst` (1.3GB) — **메인 바이너리** + 제네릭 GGML 라이브러리 + x86 용 CUDA v12/v13 라이브러리
+- `ollama-linux-arm64-jetpack6.tar.zst` (260MB) — **Jetson CUDA 라이브러리만**, 바이너리 없음 (오버레이 패키지)
+
+jetpack6 tarball 만 받아서는 `ollama` 실행 파일이 없어서 실패.
+
+**확인 방법**
+tar 내용물을 먼저 본다:
+```bash
+tar --zstd -tf ollama-linux-arm64-jetpack6.tar.zst | head
+```
+
+**해결**
+두 tarball 을 둘 다 풀어야 함. 메인 → 그 위에 jetpack6 오버레이.
+또한 메인 tarball 의 `lib/ollama/cuda_v12/`, `cuda_v13/` 은 Jetson 에서 안 쓰므로
+`--exclude` 로 제외 (4GB 절감).
+
+**교훈**
+"왜 latest 에 있는 파일을 썼는데 안 되지?" 싶으면, **압축 파일 내용물을 직접 확인하는 것**이
+가장 빠른 진단. 어셈블리 패키지 분리(split package) 는 흔한 패턴.
+
+---
+
+### 10.4 `NvMapMemAllocInternalTagged error 12` — CUDA 메모리 할당 실패
+
+**에러 (컨테이너 로그)**
+```
+NvMapMemAllocInternalTagged: 1075072515 error 12
+ggml_backend_cuda_buffer_type_alloc_buffer: allocating 1834.83 MiB on device 0:
+  cudaMalloc failed: out of memory
+llama_model_load: error loading model: unable to allocate CUDA0 buffer
+panic: unable to load model
+```
+
+API 응답:
+```json
+{"error": "llama runner process has terminated: %!w(<nil>)"}
+```
+
+**1차 진단**
+- `free -h` → 메모리 5.7GiB 여유 (부족하지 않음)
+- Ollama 가 보기에도 `CUDA available="5.2 GiB"` — 용량은 있음
+- 그런데 NvMap 이 1.8GiB 할당을 거부
+
+NvMap 은 Tegra 전용 GPU 메모리 할당자. `error 12` = ENOMEM. 용량은 있는데 거부.
+
+**2차 진단 — 컨테이너 ulimit 확인**
+```
+docker exec qwen-jetson sh -c 'ulimit -l'
+→ 64    (64KB, Docker 기본값)
+```
+호스트는 약 950MB. CUDA/NvMap 은 **GPU 메모리를 mlock 으로 고정**하는데,
+64KB 로는 택도 없음.
+
+**1차 해결 시도 — `docker-compose.yml` 에 추가**
+```yaml
+ulimits:
+  memlock: -1
+  stack: 67108864
+cap_add:
+  - IPC_LOCK
+```
+→ `ulimit -l unlimited` 로 바뀜. **그러나 같은 에러 지속.**
+
+**2차 해결 시도 — 더 많은 권한**
+```yaml
+ipc: host            # Tegra NvMap 이 호스트 IPC 네임스페이스를 요구할 가능성
+privileged: true     # 모든 cap + 모든 /dev 접근 (nuclear option)
+```
+→ **여전히 실패.**
+
+**3차 해결 시도 — mmap 끄기**
+API 호출에 `"options": {"use_mmap": false}` 추가.
+→ 1.5B 는 성공, 3B 는 다른 에러(KV cache 할당 실패)로 진행은 됨.
+
+**근본 원인**
+Ollama 공식 jetpack6 빌드가 **R36.4.0 기준으로 컴파일**됐는데, 실제 호스트는 **R36.4.7**.
+userspace 마이너 버전 차이가 CUDA ↔ Tegra 드라이버 ABI 가장자리에서 어긋남.
+결과적으로 같은 `cudaMalloc` 이라도 **UMA(통합 메모리) 경로에서 NvMap 이 거부**.
+
+**최종 해결**
+베이스 이미지를 **`dustynv/ollama:r36.4.0`** 로 교체.
+이건 [jetson-containers](https://github.com/dusty-nv/jetson-containers) 프로젝트에서
+Jetson R36.x 에 맞춰 **직접 컴파일한 Ollama** 를 제공. ABI 가 맞아 바로 동작.
+
+**교훈**
+1. 에러 메시지("out of memory") 가 거짓말할 수 있음 — 실제론 권한/드라이버 문제.
+2. Jetson 같은 임베디드 GPU 환경에선 **커뮤니티 검증 이미지** (jetson-containers) 가 안전.
+3. 공식 바이너리가 "ARM64 JetPack 6 지원" 이라고 적혀 있어도,
+   **마이너 버전까지 맞는지** 는 별개.
+
+---
+
+### 10.5 3B 모델은 여전히 OOM — mmap + KV cache 이슈
+
+**배경**
+`dustynv/ollama:r36.4.0` 으로 바꾸고 나니 1.5B 는 **GPU 에서 20 tok/s** 로 정상 동작.
+하지만 3B 는 여전히 `unable to allocate CUDA0 buffer` 로 실패.
+
+**왜 그런가**
+Orin Nano 는 **8GB 통합 메모리 (CPU+GPU 공유)**.
+- GNOME 데스크탑 + 시스템: ~2GB
+- Docker / containerd: ~수백 MB
+- 실제 CUDA 가용량: **약 5 GiB**
+
+3B 모델 (Q4_K_M, 1.8GB) + KV cache (ctx=4096, ~144MiB) + compute graph 등등 = 총 2.2GB 필요.
+수치상으론 맞는데, **mmap 기반 로딩** 이 Jetson UMA 상에서 연속 메모리를 요구하며 실패.
+
+**해결 — `Modelfile.jetson` 으로 프리셋 생성**
+```
+FROM qwen2.5:3b
+PARAMETER use_mmap false   # mmap 끄면 연속 할당 요구 완화
+PARAMETER num_ctx 2048     # KV cache 축소 (4096 → 2048)
+PARAMETER num_gpu 999      # 모든 레이어를 GPU 에 올림 (Ollama 가 실제 개수로 캡)
+```
+
+`ollama create qwen:jetson -f Modelfile.jetson` 으로 등록.
+클라이언트는 옵션 없이 `"model": "qwen:jetson"` 만 쓰면 자동으로 적용됨.
+
+**결과**
+**3B → 17 tok/s GPU 추론 성공** (한국어 입출력 포함).
+
+**교훈**
+1. LLM 메모리 = **가중치 + KV cache + compute graph + workspace** — 단순히 weight 크기만 보면 틀린다.
+2. `num_ctx` 는 KV cache 에 선형 비례 → 메모리 빡빡할 땐 가장 먼저 줄일 파라미터.
+3. 특정 환경 튜닝이 필요하면 **Modelfile 로 베이스 모델을 상속**하는 게 깔끔.
+   매번 API 요청에 옵션 달지 않아도 됨.
+
+---
+
+### 10.6 추가로 적용한 Ollama 서버 튜닝 (docker-compose 환경 변수)
+
+```yaml
+environment:
+  - OLLAMA_MAX_LOADED_MODELS=1   # 한 번에 하나의 모델만 메모리에 로드
+  - OLLAMA_NUM_PARALLEL=1        # 병렬 요청 1개 제한 (KV cache 복제 방지)
+  - OLLAMA_FLASH_ATTENTION=1     # Flash Attention 사용 (KV 메모리 대폭 절감)
+  - OLLAMA_KV_CACHE_TYPE=q8_0    # KV cache 를 q8_0 으로 양자화 (메모리 절반)
+```
+
+이 네 줄이 Orin Nano 8GB 환경에서 안정성을 크게 올림.
+
+---
+
+## 11. 최종 파일 구조 (이 시점에서)
+
+```
+qwen-jetson/
+├── Dockerfile            # FROM dustynv/ollama:r36.4.0 + entrypoint/Modelfile 복사
+├── docker-compose.yml    # runtime:nvidia + memlock 무제한 + Ollama 튜닝 env
+├── Modelfile.jetson      # qwen:jetson 프리셋 (use_mmap=false, num_ctx=2048)
+├── entrypoint.sh         # ollama serve → health check → pull → create preset
+├── .gitignore
+├── .gitattributes
+├── README.md
+└── LEARNING.md           # 이 문서
+```
+
+---
+
+## 12. 다음 단계
+
+1. `sudo usermod -aG docker $USER` 실행 후 **SSH 재접속** (초기 1회)
 2. `groups` 에 `docker` 있는지 확인
 3. `cd ~/qwen-jetson && docker compose up -d --build`
 4. `docker compose logs -f` 로 `[entrypoint] Ready.` 확인
-5. `curl http://localhost:11434/api/tags` 로 API 테스트
-6. 추론 테스트:
+5. API 테스트:
    ```bash
    curl http://localhost:11434/api/generate -d '{
-     "model": "qwen2.5:3b",
+     "model": "qwen:jetson",
      "prompt": "안녕",
      "stream": false
    }'
    ```
+6. (선택) `sudo tegrastats` 로 `GR3D_FREQ` 올라가는지 → GPU 실제 사용 확인
 
 ---
 
@@ -325,4 +552,6 @@ git 인덱스에서 `100755` 가 보이면 실행권한 포함, `100644` 는 일
 - Docker 공식 튜토리얼: https://docs.docker.com/get-started/
 - Ollama: https://ollama.com/
 - Jetson Containers (jetson-containers): https://github.com/dusty-nv/jetson-containers
+- dustynv/ollama 이미지 태그: https://hub.docker.com/r/dustynv/ollama/tags
+- Ollama Modelfile 문법: https://github.com/ollama/ollama/blob/main/docs/modelfile.md
 - 리눅스 파일시스템/마운트 개념: `man mount`, `man fstab`
