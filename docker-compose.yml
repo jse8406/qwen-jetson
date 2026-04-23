@@ -11,3 +11,13 @@ services:
       - ${OLLAMA_DATA_PATH:-./ollama-data}:/root/.ollama
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
+    # On Jetson, CUDA/NvMap pins GPU memory via mlock. Docker's default
+    # memlock ulimit (64KB) causes cudaMalloc to fail with NvMap error 12
+    # even when plenty of RAM is free. Lift it to unlimited.
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    # IPC_LOCK lets the process call mlock() without running up against
+    # the kernel's per-process limit (complements the ulimit above).
+    cap_add:
+      - IPC_LOCK
