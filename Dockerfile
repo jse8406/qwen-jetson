@@ -7,7 +7,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://ollama.com/install.sh | sh
+# Install Ollama ARM64 binary directly.
+# We avoid `install.sh` because it runs `lspci`/`lshw` for GPU detection
+# (not present in l4t-jetpack and useless on Jetson's SoC GPU anyway).
+RUN curl -fsSL https://github.com/ollama/ollama/releases/latest/download/ollama-linux-arm64.tgz \
+        -o /tmp/ollama.tgz \
+    && tar -xzf /tmp/ollama.tgz -C /usr/local \
+    && rm /tmp/ollama.tgz \
+    && /usr/local/bin/ollama --version
 
 ENV OLLAMA_HOST=0.0.0.0:11434 \
     OLLAMA_MODELS=/root/.ollama/models \
