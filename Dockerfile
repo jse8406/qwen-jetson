@@ -5,15 +5,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
+        zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Ollama ARM64 binary directly.
-# We avoid `install.sh` because it runs `lspci`/`lshw` for GPU detection
-# (not present in l4t-jetpack and useless on Jetson's SoC GPU anyway).
-RUN curl -fsSL https://github.com/ollama/ollama/releases/latest/download/ollama-linux-arm64.tgz \
-        -o /tmp/ollama.tgz \
-    && tar -xzf /tmp/ollama.tgz -C /usr/local \
-    && rm /tmp/ollama.tgz \
+# Install the Jetson-specific Ollama build (JetPack 6, includes CUDA libs
+# built for Tegra). Asset format is .tar.zst, so we need zstd to extract.
+RUN curl -fsSL https://github.com/ollama/ollama/releases/latest/download/ollama-linux-arm64-jetpack6.tar.zst \
+        -o /tmp/ollama.tar.zst \
+    && tar --zstd -xf /tmp/ollama.tar.zst -C /usr/local \
+    && rm /tmp/ollama.tar.zst \
     && /usr/local/bin/ollama --version
 
 ENV OLLAMA_HOST=0.0.0.0:11434 \
