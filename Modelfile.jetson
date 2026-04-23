@@ -1,0 +1,11 @@
+FROM qwen2.5:3b
+
+# Baked defaults tuned for Jetson Orin Nano (8GB unified memory):
+#   - use_mmap=false: avoids the NvMap/UMA allocator path that fails on
+#     large contiguous cudaMalloc when the model file is mmapped.
+#   - num_ctx=2048: keeps the GPU KV cache small enough to fit alongside
+#     ~1.8GB of model weights in the ~5GB usable CUDA memory.
+#   - num_gpu=999: put every layer on GPU (Ollama caps at actual count).
+PARAMETER use_mmap false
+PARAMETER num_ctx 2048
+PARAMETER num_gpu 999

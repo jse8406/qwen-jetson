@@ -11,17 +11,15 @@ services:
       - ${OLLAMA_DATA_PATH:-./ollama-data}:/root/.ollama
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-    # On Jetson, CUDA/NvMap pins GPU memory via mlock. Docker's default
-    # memlock ulimit (64KB) causes cudaMalloc to fail with NvMap error 12
-    # even when plenty of RAM is free. Lift it to unlimited.
+      # Keep only one model loaded at a time — Orin Nano shares 8GB with
+      # the OS, so multi-model caching quickly OOMs.
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NUM_PARALLEL=1
+      # Flash attention + quantised KV cache shrink context memory a lot.
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
+    # CUDA/NvMap on Tegra locks GPU memory via mlock; the default 64KB
+    # limit causes cudaMalloc failures. Lift it to unlimited.
     ulimits:
       memlock: -1
       stack: 67108864
-    # NvMap on Tegra shares GPU memory regions via the host IPC namespace;
-    # keeping the container's IPC namespace separate breaks the allocator.
-    ipc: host
-    # Privileged mode is a catch-all that gives the container all host
-    # capabilities plus access to every /dev node. It resolves the last
-    # Tegra device / capability edge cases we'd otherwise have to
-    # enumerate one by one (nvgpu/nvhost-* nodes, cap_sys_admin, etc.).
-    privileged: true

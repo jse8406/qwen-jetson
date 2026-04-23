@@ -2,6 +2,8 @@
 set -euo pipefail
 
 MODEL="${QWEN_MODEL:-qwen2.5:3b}"
+JETSON_MODEL="${JETSON_MODEL:-qwen:jetson}"
+JETSON_MODELFILE="${JETSON_MODELFILE:-/Modelfile.jetson}"
 HOST="${OLLAMA_HOST:-0.0.0.0:11434}"
 
 echo "[entrypoint] Starting ollama serve..."
@@ -30,5 +32,16 @@ else
     echo "[entrypoint] Pull complete."
 fi
 
-echo "[entrypoint] Ready. Serving on ${HOST} | model=${MODEL}"
+if [ -f "${JETSON_MODELFILE}" ]; then
+    if ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${JETSON_MODEL}"; then
+        echo "[entrypoint] Preset '${JETSON_MODEL}' already present."
+    else
+        echo "[entrypoint] Creating Jetson-tuned preset '${JETSON_MODEL}' from ${JETSON_MODELFILE}..."
+        ollama create "${JETSON_MODEL}" -f "${JETSON_MODELFILE}"
+    fi
+fi
+
+echo "[entrypoint] Ready. Serving on ${HOST}"
+echo "[entrypoint]   base model  = ${MODEL}"
+echo "[entrypoint]   preset model= ${JETSON_MODEL}  (Jetson-tuned: no mmap, num_ctx=2048)"
 wait "${SERVE_PID}"
