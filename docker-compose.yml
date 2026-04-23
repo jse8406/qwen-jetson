@@ -17,7 +17,11 @@ services:
     ulimits:
       memlock: -1
       stack: 67108864
-    # IPC_LOCK lets the process call mlock() without running up against
-    # the kernel's per-process limit (complements the ulimit above).
-    cap_add:
-      - IPC_LOCK
+    # NvMap on Tegra shares GPU memory regions via the host IPC namespace;
+    # keeping the container's IPC namespace separate breaks the allocator.
+    ipc: host
+    # Privileged mode is a catch-all that gives the container all host
+    # capabilities plus access to every /dev node. It resolves the last
+    # Tegra device / capability edge cases we'd otherwise have to
+    # enumerate one by one (nvgpu/nvhost-* nodes, cap_sys_admin, etc.).
+    privileged: true
